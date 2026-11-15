@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>heli</title>
+<style>
+	html, body { margin: 0; height: 100%; overflow: hidden; background: #000; font-family: monospace; }
+	canvas { display: block; }
+	#help { position: fixed; left: 0; top: 0; right: 0; bottom: 0; display: flex; align-items: center; justify-content: center; background: rgba(0, 0, 0, 0.45); color: #e8ffe8; cursor: pointer; }
+	#help div { background: rgba(10, 20, 14, 0.85); border: 2px solid #2f8a4a; padding: 22px 30px; line-height: 1.6; font-size: 15px; }
+	#help h1 { margin: 0 0 8px 0; font-size: 26px; color: #7dff9a; }
+	#help b { color: #ffd24a; }
+	#vr { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); padding: 12px 26px; font: bold 16px monospace; color: #0c1410; background: #7dff9a; border: 0; border-radius: 4px; cursor: pointer; z-index: 2; }
+	#vr:disabled { background: #556; color: #aab; cursor: default; }
+</style>
+</head>
+<body>
+<div id="help"><div>
+	<h1>HELI</h1>
+	Destroy the red vans, the roof guns and the enemy helicopters.<br>
+	You aim with your view. The ring shows the aim point.<br><br>
+	<b>VR</b> &nbsp; left stick: fly and turn &nbsp; right stick: height<br>
+	&nbsp; &nbsp; &nbsp; right trigger: gun &nbsp; left trigger: rocket<br>
+	<b>Mac</b> &nbsp; W A S D: fly and turn &nbsp; R F: height &nbsp; trackpad: view<br>
+	&nbsp; &nbsp; &nbsp; SPACE: gun &nbsp; E: rocket<br><br>
+	Click to start.
+</div></div>
+<button id="vr" disabled>...</button>
+<script src="three.min.js"></script>
+<script src="world.js"></script>
+<script src="game.js"></script>
+<script src="main.js"></script>
+</body>
+</html>
