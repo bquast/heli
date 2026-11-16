@@ -1,5 +1,6 @@
 // game.js - the helicopter, the weapons, the enemies, the panel and the sound.
-// Classic script. It uses roofAt(), clamp(), approach(), boxesGeometry(), makeRandom(), newRoadCar(), moveRoadCar() from world.js.
+// Classic script. It uses roofAt(), inZone(), clamp(), approach(), boxesGeometry(), makeRandom(), newRoadCar(), moveRoadCar(),
+// wreckCar(), dropPed(), scarePeds() and the lists city.cars and city.peds from world.js.
 //
 // main.js calls makeGame() one time and updateGame() each frame.
 //
@@ -9,8 +10,13 @@
 //   the cockpit frame is always in view, as a fixed reference for the eyes.
 //   there is no fall and no crash: the helicopter stays above the roofs by itself.
 //
+// Aim: by default you point with the right controller. The other mode is aim with the head.
+//
+// The city reacts as in GTA: you can shoot the cars and the pedestrians. Each crime adds to the wanted level
+// (1 to 5 stars). The police then come with cars and helicopters. With no new crime the stars go away.
+//
 // Order of this file:
-//   constants, models, make, flight, aim, gun, rockets, enemies, shells, effects, waves, panel, sound, update.
+//   constants, models, make, flight, aim, gun, rockets, civilians, enemies, police, shells, effects, waves, panel, sound, update.
 
 // ---------- constants ----------
 
@@ -26,6 +32,10 @@ var EYE = { x: 0, y: 1.5, z: -0.3 };                 // the desktop camera in th
 var VAN = { kind: 'van', hp: 40, r: 7, range: 420, wait: 2.4, score: 100, up: 3 };
 var TURRET = { kind: 'turret', hp: 60, r: 6, range: 520, wait: 1.7, score: 150, up: 2.5 };
 var GUNSHIP = { kind: 'gunship', hp: 90, r: 8, range: 480, wait: 2.8, score: 300, up: 0 };
+var COP_CAR = { kind: 'copcar', hp: 50, r: 6, range: 380, wait: 2.0, score: 50, up: 2 };
+var COP_HELI = { kind: 'copheli', hp: 80, r: 8, range: 460, wait: 3.0, score: 100, up: 0 };
+// the wanted level: what each crime adds, and how fast it goes away
+var CRIME = { car: 0.6, ped: 0.4, cop: 0.8, calm: 15, fade: 25 };
 
 // ---------- models (the front points to -z) ----------
 
@@ -68,8 +78,17 @@ function turretGunGeometry() {
 	]);
 }
 
-function gunshipGeometry() {
-	var hull = 0x30343a, red = 0xb02020;
+function copCarGeometry() {
+	var black = 0x18181c, white = 0xf2f2f2;
+	return boxesGeometry([
+		[2.1, 0.9, 5, 0, 0.75, 0, black],
+		[2.12, 0.92, 1.8, 0, 0.75, 0, white],
+		[1.9, 0.7, 2.6, 0, 1.5, 0.2, white],
+		[1.2, 0.12, 0.3, 0, 1.92, 0.2, 0x333333]
+	]);
+}
+
+function gunshipGeometry(hull, red) {
 	return boxesGeometry([
 		[2, 2, 6, 0, 0, 0, hull],
 		[1.4, 1.2, 2, 0, -0.3, -3.8, hull],
@@ -84,13 +103,13 @@ function rotorGeometry(r) {
 	return boxesGeometry([[r * 2, 0.06, r * 0.07, 0, 0, 0, 0x1c1c1c], [r * 0.07, 0.06, r * 2, 0, 0, 0, 0x1c1c1c]]);
 }
 
-// the red mark above each enemy
+// the mark above each enemy. The material gives the color: red for the gangs, blue for the police.
 function markerTexture() {
 	var canvas = document.createElement('canvas');
 	canvas.width = 64;
 	canvas.height = 64;
 	var c = canvas.getContext('2d');
-	c.strokeStyle = '#ff3a2a';
+	c.strokeStyle = '#ffffff';
 	c.lineWidth = 7;
 	c.beginPath();
 	c.moveTo(32, 6);
@@ -104,21 +123,50 @@ function markerTexture() {
 
 // ---------- make ----------
 
-function makeGame(scene, camera) {
+function makeGame(scene, camera, renderer) {
 	var game = {
 		scene: scene, camera: camera,
 		rnd: makeRandom(7),
 		mat: new THREE.MeshLambertMaterial({ vertexColors: true }),
 		player: { group: new THREE.Group(), x: START.x, y: START.y, z: START.z, yaw: START.yaw, speed: 0, climb: 0, turn: 0, hp: 100, hurtT: 0, deadT: 0, gunT: 0, rocketT: 0, pod: 1, rotor: null },
 		aim: { point: new THREE.Vector3(), enemy: null, t: 0 },
-		reticle: null, shade: null,
+		aimHead: false,       // false: aim with the right controller. true: aim with the head.
+		hands: [], reticle: null, shade: null,
+		heat: 0, crimeT: 0, copT: 0, smokeT: 0,      // the wanted level is heat, 0 to 5
 		enemies: [], rockets: [], tracers: [], booms: [], shells: [], shellMesh: null,
-		geo: { van: vanGeometry(), base: turretBaseGeometry(), gun: turretGunGeometry(), ship: gunshipGeometry(), rotor: rotorGeometry(6.5), rocket: boxesGeometry([[0.25, 0.25, 1.6, 0, 0, 0, 0xe8e8e8]]) },
-		markerMat: new THREE.SpriteMaterial({ map: markerTexture(), depthTest: false, sizeAttenuation: false, fog: false }),
+		geo: { van: vanGeometry(), base: turretBaseGeometry(), gun: turretGunGeometry(), ship: gunshipGeometry(0x30343a, 0xb02020), copCar: copCarGeometry(), copHeli: gunshipGeometry(0xf0f0f0, 0x2a4a9a), rotor: rotorGeometry(6.5), rocket: boxesGeometry([[0.25, 0.25, 1.6, 0, 0, 0, 0xe8e8e8]]) },
+		markerMat: null, copMarkerMat: null,
 		started: false, score: 0, wave: 0, waveT: 3, message: 'GET READY', messageT: 3,
 		panel: null, panelT: 0, audio: null, time: 0
 	};
 	var p = game.player;
+	var markTex = markerTexture();
+	game.markerMat = new THREE.SpriteMaterial({ map: markTex, color: 0xff3a2a, depthTest: false, sizeAttenuation: false, fog: false });
+	game.copMarkerMat = new THREE.SpriteMaterial({ map: markTex, color: 0x4aa0ff, depthTest: false, sizeAttenuation: false, fog: false });
+
+	// the controllers. Each has a small block. The right one also has a beam that shows the aim.
+	var gripGeo = new THREE.BoxGeometry(0.045, 0.045, 0.13);
+	var beamGeo = new THREE.BoxGeometry(0.004, 0.004, 1.6);
+	beamGeo.translate(0, 0, -0.9);
+	for (var h = 0; h < 2; h++) {
+		var hand = renderer.xr.getController(h);
+		hand.userData.side = '';
+		hand.userData.beam = new THREE.Mesh(beamGeo, new THREE.MeshBasicMaterial({ color: 0x7dff7d, transparent: true, opacity: 0.55, fog: false }));
+		hand.userData.beam.visible = false;
+		hand.add(new THREE.Mesh(gripGeo, game.mat));
+		hand.add(hand.userData.beam);
+		hand.visible = false;
+		hand.addEventListener('connected', function (e) {
+			this.userData.side = e.data.handedness;
+			this.visible = true;
+		});
+		hand.addEventListener('disconnected', function () {
+			this.userData.side = '';
+			this.visible = false;
+		});
+		p.group.add(hand);
+		game.hands.push(hand);
+	}
 
 	// the cockpit
 	p.group.add(new THREE.Mesh(cockpitGeometry(), game.mat));
@@ -142,10 +190,10 @@ function makeGame(scene, camera) {
 	p.group.add(screen);
 	game.panel = { canvas: canvas, c: canvas.getContext('2d'), tex: tex };
 
-	// the aim ring. It is on the thing that you look at.
+	// the aim ring. It is on the thing that you aim at.
 	game.reticle = new THREE.Mesh(new THREE.RingGeometry(0.42, 0.55, 28), new THREE.MeshBasicMaterial({ color: 0x7dff7d, depthTest: false, fog: false, transparent: true, opacity: 0.9 }));
 	game.reticle.renderOrder = 998;
-	camera.add(game.reticle);
+	scene.add(game.reticle);
 
 	// a dark ball around the head: red for a hit, black when the helicopter is down
 	game.shade = new THREE.Mesh(new THREE.SphereGeometry(0.4, 12, 8), new THREE.MeshBasicMaterial({ color: 0x000000, side: THREE.BackSide, transparent: true, opacity: 0, depthTest: false, fog: false }));
@@ -188,6 +236,12 @@ function placePlayer(game) {
 
 // ---------- flight ----------
 
+// the highest roof on the path, d m in front: in the middle and 4 m to each side
+function pathRoof(x, z, fx, fz, d) {
+	var cx = x + fx * d, cz = z + fz * d;
+	return Math.max(roofAt(cx, cz), roofAt(cx - fz * 4, cz + fx * 4), roofAt(cx + fz * 4, cz - fx * 4));
+}
+
 // input: move (-1..1, forward is +), turn (-1..1, right is +), climb (-1..1, up is +)
 function flyPlayer(game, input, dt) {
 	var p = game.player;
@@ -202,9 +256,9 @@ function flyPlayer(game, input, dt) {
 	var dir = (Math.abs(p.speed) > 0.5 ? p.speed : want) < 0 ? -1 : 1;
 	var here = Math.max(roofAt(p.x, p.z), roofAt(p.x + 3, p.z), roofAt(p.x - 3, p.z), roofAt(p.x, p.z + 3), roofAt(p.x, p.z - 3));
 	var v = Math.abs(p.speed);
-	var near = roofAt(p.x + fx * dir * 9, p.z + fz * dir * 9);
-	var r1 = roofAt(p.x + fx * dir * (9 + v), p.z + fz * dir * (9 + v));
-	var r2 = roofAt(p.x + fx * dir * (9 + v * 2), p.z + fz * dir * (9 + v * 2));
+	var near = pathRoof(p.x, p.z, fx, fz, dir * 9);
+	var r1 = pathRoof(p.x, p.z, fx, fz, dir * (9 + v));
+	var r2 = pathRoof(p.x, p.z, fx, fz, dir * (9 + v * 2));
 
 	// a wall in front: go slower, then stop. The helicopter then climbs above it.
 	var limit = HELI.speed;
@@ -224,7 +278,7 @@ function flyPlayer(game, input, dt) {
 		p.speed = 0;
 	}
 	var nx = p.x + fx * p.speed * dt, nz = p.z + fz * p.speed * dt;
-	if (roofAt(nx + fx * dir * 4, nz + fz * dir * 4) > p.y - 1) {
+	if (pathRoof(nx, nz, fx, fz, dir * 5) > p.y - 1) {
 		p.speed = 0;                         // never go into a wall
 	} else {
 		p.x = clamp(nx, -3400, 3400);
@@ -276,13 +330,33 @@ function rayCity(ox, oy, oz, dx, dy, dz, max) {
 	return max;
 }
 
-var aimFrom = new THREE.Vector3(), aimDir = new THREE.Vector3();
+var aimFrom = new THREE.Vector3(), aimDir = new THREE.Vector3(), eyePos = new THREE.Vector3();
 
-// find the point that the player looks at. An enemy near the line of view gets the aim.
+// the right controller, or null when there is none (on the desktop, or before it connects)
+function aimHand(game) {
+	for (var h = 0; h < game.hands.length; h++) {
+		if (game.hands[h].userData.side === 'right') {
+			return game.hands[h];
+		}
+	}
+	return null;
+}
+
+// find the point that the player aims at: with the right controller, or with the head.
+// An enemy near the aim line gets the aim.
 function findAim(game) {
 	var aim = game.aim;
-	game.camera.getWorldPosition(aimFrom);
-	game.camera.getWorldDirection(aimDir);
+	var hand = game.aimHead ? null : aimHand(game);
+	for (var h = 0; h < game.hands.length; h++) {
+		game.hands[h].userData.beam.visible = game.hands[h] === hand;
+	}
+	if (hand) {
+		hand.getWorldPosition(aimFrom);
+		aimDir.set(0, 0, -1).transformDirection(hand.matrixWorld);
+	} else {
+		game.camera.getWorldPosition(aimFrom);
+		game.camera.getWorldDirection(aimDir);
+	}
 	var best = rayCity(aimFrom.x, aimFrom.y, aimFrom.z, aimDir.x, aimDir.y, aimDir.z, GUN.range);
 	aim.enemy = null;
 	for (var i = 0; i < game.enemies.length; i++) {
@@ -306,10 +380,12 @@ function findAim(game) {
 	} else {
 		aim.point.copy(aimDir).multiplyScalar(best).add(aimFrom);
 	}
-	// the ring is at the distance of the thing, so the two eyes see it on the thing
+	// the ring is at the distance of the thing, so the two eyes see it on the thing. It faces the eyes.
 	var d = clamp(best, 15, 400);
-	game.reticle.position.set(0, 0, -d);
-	game.reticle.scale.setScalar(d / 40);
+	game.reticle.position.copy(aimDir).multiplyScalar(d).add(aimFrom);
+	game.camera.getWorldPosition(eyePos);
+	game.camera.getWorldQuaternion(game.reticle.quaternion);
+	game.reticle.scale.setScalar(eyePos.distanceTo(game.reticle.position) / 40);
 	game.reticle.material.color.setHex(aim.enemy ? 0xff5040 : 0x7dff7d);
 }
 
@@ -322,17 +398,26 @@ function fireGun(game) {
 	p.gunT = GUN.rate;
 	muzzle.set(0.6, -0.3, -2.1).applyMatrix4(p.group.matrixWorld);
 	tmpV.copy(aim.point);
-	if (!aim.enemy) {
+	// with no enemy in the aim, a car or a pedestrian on the aim line gets the hit
+	var civ = aim.enemy ? null : findCivilian(game);
+	if (civ) {
+		tmpV.set(civ.x, civ.car ? civ.car.y + 1 : 1.1, civ.z);
+	} else if (!aim.enemy) {
 		tmpV.x += (game.rnd() - 0.5) * aim.t * 0.012;
 		tmpV.y += (game.rnd() - 0.5) * aim.t * 0.012;
 		tmpV.z += (game.rnd() - 0.5) * aim.t * 0.012;
 	}
 	addTracer(game, muzzle, tmpV);
-	if (aim.t < GUN.range) {
-		addBoom(game, tmpV.x, tmpV.y, tmpV.z, aim.enemy ? 2.5 : 1.6, aim.enemy ? 0xffc040 : 0xb8b0a0, 0.25);
+	if (aim.t < GUN.range || civ) {
+		addBoom(game, tmpV.x, tmpV.y, tmpV.z, aim.enemy || civ ? 2.5 : 1.6, aim.enemy || civ ? 0xffc040 : 0xb8b0a0, 0.25);
+		scarePeds(tmpV.x, tmpV.z, 45);
 	}
 	if (aim.enemy) {
 		hurtEnemy(game, aim.enemy, GUN.damage);
+	} else if (civ && civ.car) {
+		hurtCar(game, civ.car, GUN.damage);
+	} else if (civ) {
+		hurtPed(game, civ.ped);
 	}
 	playNoise(game, 0.07, 1800, 0.16);
 }
@@ -404,12 +489,118 @@ function explode(game, x, y, z) {
 			hurtEnemy(game, e, ROCKET.damage * (1 - Math.max(0, d) / ROCKET.radius));
 		}
 	}
+	if (y < 40) {
+		blastCivilians(game, x, z, ROCKET.radius * 0.75, 100);
+		scarePeds(x, z, 130);
+	}
+}
+
+// ---------- civilians (the cars and the pedestrians of world.js) ----------
+
+// the nearest civil car or pedestrian on the aim line, or null. It gives { car or ped, x, z }.
+function findCivilian(game) {
+	var best = game.aim.t + 4, found = null, i, ex, ey, ez, along, r;
+	for (i = 0; i < city.cars.length; i++) {
+		var car = city.cars[i];
+		if (car.dead > 0 || car.y < -5) {
+			continue;
+		}
+		ex = car.x - aimFrom.x;
+		ey = car.y + 0.8 - aimFrom.y;
+		ez = car.z - aimFrom.z;
+		along = ex * aimDir.x + ey * aimDir.y + ez * aimDir.z;
+		r = 2.6 * car.long + along * 0.009;
+		if (along > 4 && along < best && ex * ex + ey * ey + ez * ez - along * along < r * r) {
+			best = along;
+			found = { car: car, ped: null, x: car.x, z: car.z };
+		}
+	}
+	for (i = 0; i < city.peds.length; i++) {
+		var ped = city.peds[i];
+		if (ped.state === 2) {
+			continue;
+		}
+		ex = ped.x - aimFrom.x;
+		ey = 1.1 - aimFrom.y;
+		ez = ped.z - aimFrom.z;
+		along = ex * aimDir.x + ey * aimDir.y + ez * aimDir.z;
+		r = 1.2 + along * 0.009;
+		if (along > 4 && along < best && ex * ex + ey * ey + ez * ez - along * along < r * r) {
+			best = along;
+			found = { car: null, ped: ped, x: ped.x, z: ped.z };
+		}
+	}
+	return found;
+}
+
+function addCrime(game, amount) {
+	game.heat = Math.min(5, game.heat + amount);
+	game.crimeT = CRIME.calm;
+}
+
+function hurtPed(game, ped) {
+	if (ped.state === 2) {
+		return;
+	}
+	dropPed(ped);
+	addCrime(game, CRIME.ped);
+}
+
+// a civil car explodes when its hp is 0. The explosion hits the things near it.
+function hurtCar(game, car, damage) {
+	if (car.dead > 0) {
+		return;
+	}
+	car.hp -= damage;
+	if (car.hp > 0) {
+		return;
+	}
+	wreckCar(car);
+	addBoom(game, car.x, car.y + 1.5, car.z, 9, 0xffa040, 0.6);
+	addBoom(game, car.x, car.y + 4, car.z, 6, 0x3a3632, 1.4);
+	playNoise(game, 0.9, 300, 0.45);
+	addCrime(game, CRIME.car);
+	scarePeds(car.x, car.z, 90);
+	blastCivilians(game, car.x, car.z, 9, 20);
+}
+
+// an explosion at x, z on the street: damage to the cars, and the pedestrians go down
+function blastCivilians(game, x, z, radius, damage) {
+	var i, dx, dz;
+	for (i = 0; i < city.peds.length; i++) {
+		dx = city.peds[i].x - x;
+		dz = city.peds[i].z - z;
+		if (dx * dx + dz * dz < radius * radius) {
+			hurtPed(game, city.peds[i]);
+		}
+	}
+	for (i = 0; i < city.cars.length; i++) {
+		var car = city.cars[i];
+		dx = car.x - x;
+		dz = car.z - z;
+		if (car.dead <= 0 && car.y > -5 && car.y < 30 && dx * dx + dz * dz < radius * radius) {
+			hurtCar(game, car, damage);
+		}
+	}
+}
+
+// smoke from the wrecks near the player
+function smokeWrecks(game) {
+	var p = game.player, n = 0;
+	for (var i = 0; i < city.cars.length && n < 6; i++) {
+		var car = city.cars[i];
+		if (car.dead > 0 && Math.abs(car.x - p.x) < 500 && Math.abs(car.z - p.z) < 500) {
+			addBoom(game, car.x + game.rnd() * 2 - 1, car.y + 3 + game.rnd() * 3, car.z + game.rnd() * 2 - 1, 3.5, 0x2a2a2a, 1.3);
+			n++;
+		}
+	}
 }
 
 // ---------- enemies ----------
 
-function addEnemy(game, stats, group) {
-	var e = { stats: stats, group: group, marker: new THREE.Sprite(game.markerMat), x: 0, y: 0, z: 0, hp: stats.hp, fireT: 1 + game.rnd() * stats.wait, burst: 0, car: null, gun: null, rotor: null, a: 0 };
+// cop: true for the police. The police do not count as targets of a wave.
+function addEnemy(game, stats, group, cop) {
+	var e = { stats: stats, group: group, marker: new THREE.Sprite(cop ? game.copMarkerMat : game.markerMat), x: 0, y: 0, z: 0, hp: stats.hp, fireT: 1 + game.rnd() * stats.wait, burst: 0, car: null, gun: null, rotor: null, a: 0, cop: cop, leaveT: 0, lights: null };
 	e.marker.scale.set(0.035, 0.035, 1);
 	e.marker.renderOrder = 997;
 	game.scene.add(group);
@@ -424,10 +615,23 @@ function spawnVan(game) {
 	var mesh = new THREE.Mesh(game.geo.van, game.mat);
 	mesh.scale.setScalar(1.6);
 	group.add(mesh);
-	var e = addEnemy(game, VAN, group);
-	e.car = newRoadCar(game.rnd, false);
+	var e = addEnemy(game, VAN, group, false);
+	e.car = roadCarAt(game, 0, 99999);
 	e.car.speed = 11;
-	moveRoadCar(e.car, 0);
+}
+
+// a new car on a street, not in a place with no streets, and from near to far m from the player
+function roadCarAt(game, near, far) {
+	var p = game.player, car = null;
+	for (var tries = 0; tries < 200; tries++) {
+		car = newRoadCar(game.rnd, false);
+		moveRoadCar(car, 0, true);
+		var d = Math.sqrt((car.x - p.x) * (car.x - p.x) + (car.z - p.z) * (car.z - p.z));
+		if (!inZone(car.x, car.z) && d >= near && d <= far) {
+			break;
+		}
+	}
+	return car;
 }
 
 // a gun on a roof
@@ -458,7 +662,7 @@ function spawnTurret(game) {
 	gun.scale.setScalar(1.5);
 	gun.position.y = 2.4;
 	group.add(gun);
-	var e = addEnemy(game, TURRET, group);
+	var e = addEnemy(game, TURRET, group, false);
 	e.gun = gun;
 	e.x = best.x;
 	e.y = best.y;
@@ -466,15 +670,15 @@ function spawnTurret(game) {
 	group.position.set(e.x, e.y, e.z);
 }
 
-// an enemy helicopter. It flies around the player.
-function spawnGunship(game) {
+// an enemy helicopter (a gunship or the police). It flies around the player.
+function spawnGunship(game, stats, geo, cop) {
 	var p = game.player;
 	var group = new THREE.Group();
-	group.add(new THREE.Mesh(game.geo.ship, game.mat));
+	group.add(new THREE.Mesh(geo, game.mat));
 	var rotor = new THREE.Mesh(game.geo.rotor, game.mat);
 	rotor.position.y = 1.5;
 	group.add(rotor);
-	var e = addEnemy(game, GUNSHIP, group);
+	var e = addEnemy(game, stats, group, cop);
 	e.rotor = rotor;
 	e.a = game.rnd() * Math.PI * 2;
 	e.x = clamp(p.x + Math.cos(e.a) * 1000, -3000, 3000);
@@ -487,7 +691,11 @@ function updateEnemies(game, dt) {
 	for (var i = 0; i < game.enemies.length; i++) {
 		var e = game.enemies[i];
 		if (e.car) {
-			moveRoadCar(e.car, dt);
+			if (e.cop && e.leaveT <= 0) {
+				steerCopCar(game, e.car, dt);
+			} else {
+				moveRoadCar(e.car, dt, true);
+			}
 			e.x = e.car.x;
 			e.z = e.car.z;
 			e.y = e.car.y;
@@ -499,7 +707,8 @@ function updateEnemies(game, dt) {
 		if (e.rotor) {
 			// fly to a point on a circle around the player
 			e.a += 0.12 * dt;
-			var tx = p.x + Math.cos(e.a) * 230 - e.x, tz = p.z + Math.sin(e.a) * 230 - e.z;
+			var ring = e.leaveT > 0 ? 3000 : 230;
+			var tx = p.x + Math.cos(e.a) * ring - e.x, tz = p.z + Math.sin(e.a) * ring - e.z;
 			var td = Math.sqrt(tx * tx + tz * tz) + 0.001;
 			var sp = Math.min(34, td);
 			e.x += tx / td * sp * dt;
@@ -514,7 +723,13 @@ function updateEnemies(game, dt) {
 		// fire
 		var dx = p.x - e.x, dy = p.y + 1 - e.y - e.stats.up, dz = p.z - e.z;
 		var d = Math.sqrt(dx * dx + dy * dy + dz * dz);
-		if (d < e.stats.range && p.deadT <= 0) {
+		if (e.lights) {
+			// red and blue, one after the other
+			var on = Math.floor(game.time * 5) % 2 === 0;
+			e.lights[0].visible = on;
+			e.lights[1].visible = !on;
+		}
+		if (d < e.stats.range && p.deadT <= 0 && e.leaveT <= 0) {
 			e.fireT -= dt;
 			if (e.fireT <= 0) {
 				fireShell(game, e, d);
@@ -542,10 +757,119 @@ function hurtEnemy(game, e, damage) {
 	addBoom(game, e.x, e.y + e.stats.up, e.z, 16, 0xffa040, 0.7);
 	addBoom(game, e.x, e.y + e.stats.up + 5, e.z, 11, 0x3a3632, 1.6);
 	playNoise(game, 1.3, 260, 0.6);
+	removeEnemy(game, e);
+	game.score += e.stats.score;
+	if (e.cop) {
+		addCrime(game, CRIME.cop);
+	}
+	if (e.car) {
+		scarePeds(e.x, e.z, 90);
+		blastCivilians(game, e.x, e.z, 9, 20);
+	}
+}
+
+function removeEnemy(game, e) {
 	game.scene.remove(e.group);
 	game.scene.remove(e.marker);
 	game.enemies.splice(game.enemies.indexOf(e), 1);
-	game.score += e.stats.score;
+}
+
+// ---------- police ----------
+
+function wantedStars(game) {
+	return Math.min(5, Math.ceil(game.heat - 0.0001));
+}
+
+function spawnCopCar(game) {
+	var group = new THREE.Group();
+	var mesh = new THREE.Mesh(game.geo.copCar, game.mat);
+	mesh.scale.setScalar(1.5);
+	group.add(mesh);
+	var lightGeo = new THREE.BoxGeometry(0.7, 0.35, 0.5);
+	var red = new THREE.Mesh(lightGeo, new THREE.MeshBasicMaterial({ color: 0xff2a2a, fog: false }));
+	var blue = new THREE.Mesh(lightGeo, new THREE.MeshBasicMaterial({ color: 0x3a6aff, fog: false }));
+	red.position.set(-0.6, 3.1, 0.3);
+	blue.position.set(0.6, 3.1, 0.3);
+	group.add(red);
+	group.add(blue);
+	var e = addEnemy(game, COP_CAR, group, true);
+	e.lights = [red, blue];
+	e.car = roadCarAt(game, 300, 750);
+	e.car.speed = 22;
+}
+
+// a police car drives to the player. At each crossing it takes the street that goes nearer.
+function steerCopCar(game, car, dt) {
+	var p = game.player;
+	var dx = p.x - car.x, dz = p.z - car.z;
+	car.speed = dx * dx + dz * dz < 90 * 90 ? 0 : 22;
+	var next = car.pos + car.dir * car.speed * dt;
+	var lo = Math.min(car.pos, next), hi = Math.max(car.pos, next);
+	var cross = CITY_MIN + Math.floor((hi - CITY_MIN) / CELL) * CELL;
+	if (cross > lo && cross <= hi && cross > CITY_MIN && cross < CITY_MAX) {
+		var along = (car.axis === 0 ? p.x : p.z) - cross;
+		var across = (car.axis === 0 ? p.z : p.x) - car.line;
+		if (Math.abs(across) > 70 && (Math.abs(across) > Math.abs(along) || along * car.dir < 0)) {
+			// turn into the other street
+			car.pos = car.line;
+			car.line = cross;
+			car.axis = 1 - car.axis;
+			car.dir = across > 0 ? 1 : -1;
+		} else if (along * car.dir < 0 && Math.abs(along) > 70) {
+			car.dir = -car.dir;
+		}
+	}
+	moveRoadCar(car, dt, true);
+}
+
+// the wanted level goes away with no new crime. The police come and go with the stars.
+function updateWanted(game, dt) {
+	game.crimeT -= dt;
+	if (game.crimeT <= 0) {
+		game.heat = Math.max(0, game.heat - dt / CRIME.fade);
+	}
+	var stars = wantedStars(game), cars = 0, helis = 0, i, e;
+	for (i = game.enemies.length - 1; i >= 0; i--) {
+		e = game.enemies[i];
+		if (!e.cop) {
+			continue;
+		}
+		if (e.leaveT > 0) {
+			e.leaveT -= dt;
+			if (e.leaveT <= 0) {
+				removeEnemy(game, e);
+			}
+		} else if (stars === 0) {
+			e.leaveT = 10;                   // no stars: the police stop the fire and go away
+			if (e.car) {
+				e.car.speed = 22;
+			}
+		} else if (e.car) {
+			cars++;
+		} else {
+			helis++;
+		}
+	}
+	game.copT -= dt;
+	if (game.copT <= 0 && game.player.deadT <= 0) {
+		game.copT = 2.5;
+		if (cars < Math.min(stars, 4)) {
+			spawnCopCar(game);
+		} else if (helis < stars - 2) {
+			spawnGunship(game, COP_HELI, game.geo.copHeli, true);
+		}
+	}
+}
+
+// the number of enemies that are not the police
+function countTargets(game) {
+	var n = 0;
+	for (var i = 0; i < game.enemies.length; i++) {
+		if (!game.enemies[i].cop) {
+			n++;
+		}
+	}
+	return n;
 }
 
 // ---------- shells (the enemy fire) ----------
@@ -632,6 +956,7 @@ function updateShade(game, dt) {
 			p.turn = 0;
 			p.hp = 100;
 			game.shells.length = 0;
+			game.heat = 0;
 			game.score = Math.max(0, game.score - 500);
 			placePlayer(game);
 		}
@@ -694,7 +1019,7 @@ function startWave(game) {
 		spawnTurret(game);
 	}
 	for (var c = 0; c < Math.floor(n / 2); c++) {
-		spawnGunship(game);
+		spawnGunship(game, GUNSHIP, game.geo.ship, false);
 	}
 	game.message = 'WAVE ' + n;
 	game.messageT = 4;
@@ -702,7 +1027,7 @@ function startWave(game) {
 
 function updateWaves(game, dt) {
 	game.messageT -= dt;
-	if (game.enemies.length > 0) {
+	if (countTargets(game) > 0) {
 		return;
 	}
 	if (game.waveT <= 0) {
@@ -743,11 +1068,21 @@ function drawPanel(game) {
 	c.fillStyle = '#7dff9a';
 	c.fillText('SCORE  ' + game.score, 16, 72);
 	c.fillText('WAVE   ' + game.wave, 16, 106);
-	c.fillText('TARGETS ' + game.enemies.length, 16, 140);
-	c.fillText('ALT ' + Math.round(p.y) + '  SPD ' + Math.round(Math.abs(p.speed) * 3.6), 16, 174);
+	c.fillText('TARGETS ' + countTargets(game), 16, 140);
+	// the wanted stars
+	var stars = wantedStars(game);
+	c.fillText('WANTED', 16, 174);
+	for (var s = 0; s < 5; s++) {
+		c.fillStyle = s < stars ? '#ffd24a' : '#2f5a3a';
+		c.fillText('\u2605', 126 + s * 30, 174);
+	}
+	c.fillStyle = '#7dff9a';
+	c.font = 'bold 20px monospace';
+	c.fillText('ALT ' + Math.round(p.y) + '  SPD ' + Math.round(Math.abs(p.speed) * 3.6) + '  AIM ' + (game.aimHead ? 'HEAD' : 'HAND'), 16, 204);
+	c.font = 'bold 26px monospace';
 	if (game.messageT > 0) {
 		c.fillStyle = '#ffd24a';
-		c.fillText(game.message, 16, 222);
+		c.fillText(game.message, 16, 234);
 	}
 
 	// radar: the nose is up, the range is 1500 m
@@ -770,7 +1105,7 @@ function drawPanel(game) {
 		var fwd = -dx * sin - dz * cos, right = dx * cos - dz * sin;
 		var d = Math.sqrt(fwd * fwd + right * right) + 0.001;
 		var k = Math.min(d, 1500) / 1500 * rr / d;
-		c.fillStyle = e.rotor ? '#ffd24a' : '#ff4a3a';
+		c.fillStyle = e.cop ? '#4aa0ff' : (e.rotor ? '#ffd24a' : '#ff4a3a');
 		c.fillRect(rx + right * k - 4, ry - fwd * k - 4, 8, 8);
 	}
 	c.fillStyle = '#7dff9a';
@@ -845,10 +1180,15 @@ function playNoise(game, dur, freq, volume) {
 
 // ---------- update ----------
 
-// input: move, turn, climb (-1..1), gun, rocket (true or false)
+// input: move, turn, climb (-1..1), gun, rocket (true or false), swapAim (true for one frame)
 function updateGame(game, input, dt) {
 	var p = game.player;
 	game.time += dt;
+	if (input.swapAim) {
+		game.aimHead = !game.aimHead;
+		game.message = game.aimHead ? 'AIM WITH THE HEAD' : 'AIM WITH THE CONTROLLER';
+		game.messageT = 3;
+	}
 	if (p.deadT > 0) {
 		input = { move: 0, turn: 0, climb: 0, gun: false, rocket: false };
 	}
@@ -870,6 +1210,12 @@ function updateGame(game, input, dt) {
 	updateEffects(game, dt);
 	if (game.started) {
 		updateWaves(game, dt);
+		updateWanted(game, dt);
+	}
+	game.smokeT -= dt;
+	if (game.smokeT <= 0) {
+		game.smokeT = 0.5;
+		smokeWrecks(game);
 	}
 	game.panelT -= dt;
 	if (game.panelT <= 0) {

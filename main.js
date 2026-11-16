@@ -1,17 +1,20 @@
 // main.js - the renderer, the VR session, the input and the loop.
-// Classic script. It uses makeCity(), updateTraffic() from world.js and makeGame(), updateGame(), startAudio() from game.js.
+// Classic script. It uses makeCity(), updateCity() from world.js and makeGame(), updateGame(), startAudio() from game.js.
 //
 // Controls:
 //   VR:       left stick: forward, back, turn.   right stick up and down: height.
-//             right trigger: gun.   left trigger: rocket.   You aim with your head.
+//             right trigger: gun.   left trigger: rocket.
+//             You aim with the right controller. A or X changes to aim with the head, and back.
 //   desktop:  W S: forward, back.   A D: turn.   R F: height.
-//             the trackpad or the mouse moves the view.   SPACE or click: gun.   E or right click: rocket.
+//             the trackpad or the mouse moves the view and the aim.   SPACE or click: gun.   E or right click: rocket.
+//             (T changes the aim mode. On the desktop the two modes are the same.)
 
 var renderer, scene, camera, game;
 var keys = {};
 var look = { yaw: 0, pitch: -0.15 };     // the desktop view, relative to the cockpit
 var mouse = { gun: false, rocket: false };
 var lastMs = 0;
+var swapDown = false;                    // the button that changes the aim mode was down in the last frame
 
 function main() {
 	renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -24,8 +27,8 @@ function main() {
 	scene = new THREE.Scene();
 	camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.15, 10000);
 	camera.rotation.order = 'YXZ';
-	makeCity(scene);
-	game = makeGame(scene, camera);
+	makeCity(scene, START.x, START.z);
+	game = makeGame(scene, camera, renderer);
 
 	window.addEventListener('resize', function () {
 		camera.aspect = window.innerWidth / window.innerHeight;
@@ -137,7 +140,8 @@ function dead(v) {
 }
 
 function readInput() {
-	var input = { move: 0, turn: 0, climb: 0, gun: false, rocket: false };
+	var input = { move: 0, turn: 0, climb: 0, gun: false, rocket: false, swapAim: false };
+	var swap = keys.KeyT === true;
 	// keys and mouse
 	input.move = (keys.KeyW || keys.ArrowUp ? 1 : 0) - (keys.KeyS || keys.ArrowDown ? 1 : 0);
 	input.turn = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
@@ -153,6 +157,7 @@ function readInput() {
 				continue;
 			}
 			var trigger = pad.buttons.length > 0 && pad.buttons[0].pressed;
+			swap = swap || (pad.buttons.length > 4 && pad.buttons[4].pressed);       // A on the right, X on the left
 			if (src.handedness === 'left') {
 				input.turn += dead(pad.axes[2]);
 				input.move += -dead(pad.axes[3]);
@@ -163,6 +168,9 @@ function readInput() {
 			}
 		}
 	}
+	// the aim mode changes one time for each press
+	input.swapAim = swap && !swapDown;
+	swapDown = swap;
 	input.move = clamp(input.move, -1, 1);
 	input.turn = clamp(input.turn, -1, 1);
 	input.climb = clamp(input.climb, -1, 1);
@@ -178,7 +186,7 @@ function frame(ms) {
 		camera.position.set(EYE.x, EYE.y, EYE.z);
 		camera.rotation.set(look.pitch, look.yaw, 0);
 	}
-	updateTraffic(dt);
+	updateCity(dt, game.player.x, game.player.z);
 	updateGame(game, readInput(), dt);
 	renderer.render(scene, camera);
 }
